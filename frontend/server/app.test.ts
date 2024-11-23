@@ -188,7 +188,7 @@ describe('UIServer apis', () => {
             ? Promise.resolve({ ok: true, text: () => Promise.resolve('test-cluster') })
             : Promise.reject('Unexpected request'),
         );
-        app = new UIServer(loadConfigs(argv, {}));
+        app = new UIServer(loadConfigs(argv, { DISABLE_GKE_METADATA: 'false' }));
 
         const request = requests(app.start());
         request
@@ -225,7 +225,7 @@ describe('UIServer apis', () => {
             ? Promise.resolve({ ok: true, text: () => Promise.resolve('test-project') })
             : Promise.reject('Unexpected request'),
         );
-        app = new UIServer(loadConfigs(argv, {}));
+        app = new UIServer(loadConfigs(argv, { DISABLE_GKE_METADATA: 'false' }));
 
         const request = requests(app.start());
         request.get('/system/project-id').expect(200, 'test-project', done);
