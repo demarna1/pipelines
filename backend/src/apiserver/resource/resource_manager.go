@@ -796,14 +796,12 @@ func (r *ResourceManager) ReconcileSwfCrs(ctx context.Context) error {
 		default:
 		}
 
-		// Mirror the ScheduledWorkflow shape CreateJob would produce for this job today:
-		// jobs without a persisted manifest are reference-based (pinned version or
-		// "always latest") and jobs created while plugins are registered go through the
-		// CreateRun API, so both carry only the pipeline reference plus runtime inputs;
-		// only manifest-backed jobs re-embed a freshly compiled workflow.
+		// Mirror the ScheduledWorkflow shape CreateJob would produce today. A raw
+		// manifest has no pipeline reference, so it always re-embeds -- otherwise a
+		// plugins-registered reconcile would send CreateRun an empty reference.
 		var newScheduledWorkflow *scheduledworkflow.ScheduledWorkflow
-		if (jobs[i].PipelineSpec.PipelineSpecManifest == "" && jobs[i].PipelineSpec.WorkflowSpecManifest == "") ||
-			r.pluginDispatcher.PluginsRegistered() {
+		noManifest := jobs[i].PipelineSpec.PipelineSpecManifest == "" && jobs[i].PipelineSpec.WorkflowSpecManifest == ""
+		if noManifest || (r.pluginDispatcher.PluginsRegistered() && jobs[i].PipelineSpec.PipelineId != "") {
 			newScheduledWorkflow, err = template.NewReferenceScheduledWorkflow(jobs[i])
 			if err != nil {
 				return failedToReconcileSwfCrsError(err)
@@ -1524,9 +1522,10 @@ func (r *ResourceManager) CreateJob(ctx context.Context, job *model.Job) (*model
 			}
 		} else {
 			embedManifest = true
-			// When plugins are enabled, the SWF controller must call the CreateRun API
-			// so that per-run plugin logic executes.
-			if r.pluginDispatcher.PluginsRegistered() {
+			// Plugins require the CreateRun API path, which needs a pipeline reference.
+			// A raw manifest has none, so it keeps embedding rather than failing at
+			// every trigger.
+			if r.pluginDispatcher.PluginsRegistered() && job.PipelineId != "" {
 				// Plugin-enabled: create a SWF without inline workflow spec so the SWF
 				// controller calls the CreateRun API for per-run plugin logic. The
 				// reference SWF still carries the runtime parameters and pipeline root

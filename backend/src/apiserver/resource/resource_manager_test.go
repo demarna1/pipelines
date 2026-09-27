@@ -3805,6 +3805,35 @@ func TestCreateJob_ThroughPipelineVersionV2_InvalidParams(t *testing.T) {
 	assert.Contains(t, err.Error(), "parameter(s) provided are not required by pipeline: param2")
 }
 
+func TestCreateJob_RawManifest_PluginsRegistered_KeepsEmbeddedWorkflow(t *testing.T) {
+	store, manager, exp := initWithExperiment(t)
+	defer store.Close()
+	// Raw manifest has no pipeline reference, so it must keep embedding even with
+	// plugins registered -- otherwise CreateRun gets an empty reference.
+	manager.pluginDispatcher = &countingTerminalReportDispatcher{}
+
+	job := &model.Job{
+		DisplayName: "j1",
+		Enabled:     true,
+		PipelineSpec: model.PipelineSpec{
+			PipelineSpecManifest: model.LargeText(v2SpecHelloWorld),
+			RuntimeConfig: model.RuntimeConfig{
+				Parameters:   "{\"text\":\"world\"}",
+				PipelineRoot: "job-1-root",
+			},
+		},
+		ExperimentId: exp.UUID,
+	}
+	newJob, err := manager.CreateJob(context.Background(), job)
+	require.Nil(t, err)
+	assert.NotEmpty(t, newJob.PipelineSpecManifest)
+
+	swf, err := store.SwfClient().ScheduledWorkflow("ns1").Get(context.Background(), "job-", v1.GetOptions{})
+	require.Nil(t, err)
+	require.NotNil(t, swf.Spec.Workflow)
+	assert.NotNil(t, swf.Spec.Workflow.Spec)
+}
+
 func TestCreateJob_EmptyPipelineSpec(t *testing.T) {
 	initEnvVars()
 	store := NewFakeClientManagerOrFatal(util.NewFakeTimeForEpoch())
@@ -4842,6 +4871,35 @@ func TestReconcileSwfCrs_PinnedPipelineVersionReference(t *testing.T) {
 	assert.Equal(t, "text", swf.Spec.Workflow.Parameters[0].Name)
 	assert.Equal(t, "\"world\"", swf.Spec.Workflow.Parameters[0].Value)
 	assert.Equal(t, "job-1-root", swf.Spec.Workflow.PipelineRoot)
+}
+
+func TestReconcileSwfCrs_RawManifest_PluginsRegistered_KeepsEmbeddedWorkflow(t *testing.T) {
+	// Raw manifest has no pipeline reference, so reconcile must keep embedding even
+	// once plugins are registered -- otherwise CreateRun gets an empty reference.
+	store, manager, job := initWithJobV2(t)
+	defer store.Close()
+
+	swfClient := store.SwfClient().ScheduledWorkflow("ns1")
+	ctx := context.Background()
+
+	swf, err := swfClient.Get(ctx, "job-", v1.GetOptions{})
+	require.Nil(t, err)
+	require.NotNil(t, swf.Spec.Workflow)
+	require.NotNil(t, swf.Spec.Workflow.Spec)
+
+	// Plugins get registered after job creation, e.g. via an admin restart.
+	manager.pluginDispatcher = &countingTerminalReportDispatcher{}
+
+	err = manager.ReconcileSwfCrs(ctx)
+	require.Nil(t, err)
+
+	swf, err = swfClient.Get(ctx, "job-", v1.GetOptions{})
+	require.Nil(t, err)
+	assert.Empty(t, swf.Spec.PipelineId)
+	require.NotNil(t, swf.Spec.Workflow)
+	assert.NotNil(t, swf.Spec.Workflow.Spec)
+
+	assert.NotEmpty(t, job.PipelineSpecManifest)
 }
 
 func TestReportScheduledWorkflowResource_Error(t *testing.T) {
