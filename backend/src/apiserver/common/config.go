@@ -28,17 +28,23 @@ const (
 	MultiUserMode                           string = "MULTIUSER"
 	MultiUserModeSharedReadAccess           string = "MULTIUSER_SHARED_READ"
 	PodNamespace                            string = "POD_NAMESPACE"
-	CacheEnabled                            string = "CacheEnabled"
 	DefaultPipelineRunnerServiceAccountFlag string = "DEFAULTPIPELINERUNNERSERVICEACCOUNT"
+	AllowedServiceAccountsFlag              string = "ALLOWEDSERVICEACCOUNTS"
+	WorkflowIdentityMode                    string = "KFP_SECURITY_WORKFLOW_IDENTITY_MODE"
 	KubeflowUserIDHeader                    string = "KUBEFLOW_USERID_HEADER"
 	KubeflowUserIDPrefix                    string = "KUBEFLOW_USERID_PREFIX"
-	UpdatePipelineVersionByDefault          string = "AUTO_UPDATE_PIPELINE_DEFAULT_VERSION"
 	TokenReviewAudience                     string = "TOKEN_REVIEW_AUDIENCE"
+	MLPipelineGRPCBackoffBaseDelay          string = "ML_PIPELINE_GRPC_BACKOFF_BASE_DELAY"
+	MLPipelineGRPCBackoffMultiplier         string = "ML_PIPELINE_GRPC_BACKOFF_MULTIPLIER"
+	MLPipelineGRPCBackoffJitter             string = "ML_PIPELINE_GRPC_BACKOFF_JITTER"
+	MLPipelineGRPCBackoffMaxDelay           string = "ML_PIPELINE_GRPC_BACKOFF_MAX_DELAY"
+	MLPipelineGRPCMinConnectTimeout         string = "ML_PIPELINE_GRPC_MIN_CONNECT_TIMEOUT"
 	MetadataTLSEnabled                      string = "METADATA_TLS_ENABLED"
 	CaBundleSecretName                      string = "CABUNDLE_SECRET_NAME"
 	CaBundleConfigMapName                   string = "CABUNDLE_CONFIGMAP_NAME"
 	CaBundleKeyName                         string = "CABUNDLE_KEY_NAME"
 	RequireNamespaceForPipelines            string = "REQUIRE_NAMESPACE_FOR_PIPELINES"
+	ListRunsFullViewMaxPageSize             string = "LIST_RUNS_FULL_VIEW_MAX_PAGE_SIZE"
 	CompiledPipelineSpecPatch               string = "COMPILED_PIPELINE_SPEC_PATCH"
 	MLPipelineServiceName                   string = "ML_PIPELINE_SERVICE_NAME"
 	MetadataServiceName                     string = "METADATA_SERVICE_NAME"
@@ -48,6 +54,7 @@ const (
 	DefaultSecurityContextRunAsNonRoot      string = "DEFAULT_SECURITY_CONTEXT_RUN_AS_NON_ROOT"
 	DefaultSecurityContextHostUsers         string = "DEFAULT_SECURITY_CONTEXT_HOST_USERS"
 	PipelineURLAllowedDomains               string = "PIPELINE_URL_ALLOWED_DOMAINS"
+	PipelineURLAllowedCIDRs                 string = "PIPELINE_URL_ALLOWED_CIDRS"
 	PipelineURLAllowHTTP                    string = "PIPELINE_URL_ALLOW_HTTP"
 	PipelineURLTimeout                      string = "PIPELINE_URL_TIMEOUT"
 	PipelineURLValidationEnabled            string = "PIPELINE_URL_VALIDATION_ENABLED"
@@ -72,20 +79,43 @@ type PluginLimitsConfig struct {
 	MaxNestingDepth      int
 }
 
-// GetWorkflowGCGracePeriodSeconds returns the grace period in seconds before
-// a workflow without a corresponding DB entry is eligible for garbage collection.
-// This prevents race conditions where the persistence agent reports a workflow
-// before the API server has finished writing the run record to the database.
+// GetWorkflowGCGracePeriodSeconds returns the grace period in seconds during
+// which a workflow without a corresponding DB entry receives a retryable
+// response. After the grace period the API server re-reads the live workflow
+// and deletes it only when its UID and run ID label identify the orphan; it
+// never deletes based on caller-controlled report metadata. This prevents races
+// while the run record is being written.
 func GetWorkflowGCGracePeriodSeconds() int {
 	return GetIntConfigWithDefault(WorkflowGCGracePeriodSeconds, 120)
 }
 
-func IsPipelineVersionUpdatedByDefault() bool {
-	return GetBoolConfigWithDefault(UpdatePipelineVersionByDefault, true)
-}
-
 func IsNamespaceRequiredForPipelines() bool {
 	return GetBoolConfigWithDefault(RequireNamespaceForPipelines, false)
+}
+
+// GetWorkflowIdentityMode validates the temporary expanded identity policy mode.
+func GetWorkflowIdentityMode() (string, error) {
+	mode := GetStringConfigWithDefault(WorkflowIdentityMode, "enforce")
+	switch mode {
+	case "", "enforce":
+		return "enforce", nil
+	case "audit":
+		return mode, nil
+	default:
+		return "", fmt.Errorf("%s must be enforce or audit", WorkflowIdentityMode)
+	}
+}
+
+// InitializeWorkflowIdentityMode validates configuration at startup and reload.
+func InitializeWorkflowIdentityMode() error {
+	mode, err := GetWorkflowIdentityMode()
+	if err != nil {
+		return err
+	}
+	if mode == "audit" {
+		glog.Warningf("security_audit control=workflow_identity mode=audit operation=config reason=audit_enabled disposition=allow_policy_violations; %s=audit permits additional identities without enforcing their policy; restore enforce before 3.0: https://github.com/kubeflow/pipelines/issues/14367", WorkflowIdentityMode)
+	}
+	return nil
 }
 
 func GetStringConfig(configName string) string {
@@ -211,10 +241,6 @@ func GetBoolFromStringWithDefault(value string, defaultValue bool) bool {
 	return boolVal
 }
 
-func IsCacheEnabled() string {
-	return GetStringConfigWithDefault(CacheEnabled, "true")
-}
-
 func GetKubeflowUserIDHeader() string {
 	return GetStringConfigWithDefault(KubeflowUserIDHeader, GoogleIAPUserIdentityHeader)
 }
@@ -227,6 +253,36 @@ func GetTokenReviewAudience() string {
 	return GetStringConfigWithDefault(TokenReviewAudience, DefaultTokenReviewAudience)
 }
 
+// TokenAudienceForRun returns the projected-token audience bound to a single
+// in-flight run. Runtime pods authenticate with this audience so a stolen
+// launcher token cannot authorize API calls against other runs.
+func TokenAudienceForRun(runID string) string {
+	return GetTokenReviewAudience() + TokenAudienceRunPrefix + runID
+}
+
+func GetMLPipelineGRPCBackoffBaseDelay() string {
+	return GetStringConfigWithDefault(MLPipelineGRPCBackoffBaseDelay, "")
+}
+
+func GetMLPipelineGRPCBackoffMultiplier() string {
+	return GetStringConfigWithDefault(MLPipelineGRPCBackoffMultiplier, "")
+}
+
+func GetMLPipelineGRPCBackoffJitter() string {
+	return GetStringConfigWithDefault(MLPipelineGRPCBackoffJitter, "")
+}
+
+func GetMLPipelineGRPCBackoffMaxDelay() string {
+	return GetStringConfigWithDefault(MLPipelineGRPCBackoffMaxDelay, "")
+}
+
+func GetMLPipelineGRPCMinConnectTimeout() string {
+	return GetStringConfigWithDefault(MLPipelineGRPCMinConnectTimeout, "")
+}
+
+// GetMetadataTLSEnabled returns whether metadata TLS is enabled.
+// Keep this getter during the PR 1 extraction so packages that still depend on
+// the MLMD runtime wiring continue to build until PR 2 removes those call sites.
 func GetMetadataTLSEnabled() bool {
 	return GetBoolConfigWithDefault(MetadataTLSEnabled, DefaultMetadataTLSEnabled)
 }
@@ -328,4 +384,25 @@ func GetRunsGCBatchSize() int {
 		return 1000
 	}
 	return configuredBatchSize
+}
+
+func ValidateServiceAccountAllowList(serviceAccount string) error {
+	if serviceAccount == "" {
+		return nil
+	}
+	defaultServiceAccount := GetStringConfigWithDefault(DefaultPipelineRunnerServiceAccountFlag, DefaultPipelineRunnerServiceAccount)
+	if serviceAccount == defaultServiceAccount {
+		return nil
+	}
+
+	allowedServiceAccounts := GetStringConfigWithDefault(AllowedServiceAccountsFlag, "")
+	if allowedServiceAccounts == "" {
+		return fmt.Errorf("service account %q is not allowed; contact your administrator to configure the allowed service accounts", serviceAccount)
+	}
+	for allowed := range strings.SplitSeq(allowedServiceAccounts, ",") {
+		if strings.TrimSpace(allowed) == serviceAccount {
+			return nil
+		}
+	}
+	return fmt.Errorf("service account %q is not allowed; contact your administrator to configure the allowed service accounts", serviceAccount)
 }

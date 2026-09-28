@@ -505,6 +505,7 @@ func (c *Controller) syncHandler(ctx context.Context, key string) (
 	// Get active workflows for this ScheduledWorkflow.
 	startTime = time.Time{}
 	active, err := c.workflowClient.List(
+		swf.Namespace,
 		swf.Name,
 		// active workflow
 		false,
@@ -521,7 +522,8 @@ func (c *Controller) syncHandler(ctx context.Context, key string) (
 
 	startTime = time.Now()
 	// Get completed workflows for this ScheduledWorkflow.
-	completed, err := c.workflowClient.List(swf.Name,
+	completed, err := c.workflowClient.List(swf.Namespace,
+		swf.Name,
 		true, /* completed workflows */
 		swf.MinIndex())
 	if err != nil {
@@ -626,11 +628,11 @@ func (c *Controller) submitNewWorkflowIfNotAlreadySubmitted(
 
 	// If the workflow is not found, we need to create it.
 	if swf.Spec.Workflow != nil && swf.Spec.Workflow.Spec != nil {
-		// V1 recurring runs bypass the API server by embedding the workflow spec directly in the ScheduledWorkflow CRD,
-		// so the V1 pipeline block needs to be enforced at the controller level as well.
-		if shouldEnforceV1Block(swf) {
+		// Only IR-compiled execution templates are supported. This marker check
+		// distinguishes formats; Kubernetes RBAC still controls CRD access.
+		if hasUnsupportedWorkflowTemplate(swf) {
 			return false, "", fmt.Errorf(
-				"namespace %s is not allowed to run v1 pipelines; please migrate to KFP v2 pipelines", swf.Namespace)
+				"namespace %s has a legacy workflow template; recreate the recurring run from a KFP IR pipeline", swf.Namespace)
 		}
 		newWorkflow, err := swf.NewWorkflow(nextScheduledEpoch, nowEpoch)
 		if err != nil {
@@ -774,10 +776,10 @@ func (c *Controller) updateStatus(
 	return nil
 }
 
-// shouldEnforceV1Block Returns true allowing V2 workflows when key V2 component or pipeline labels
-// are present on the pod metadata. Returns false if the workflow is v1.
-func shouldEnforceV1Block(swf *util.ScheduledWorkflow) bool {
-	if swf == nil || !commonutil.IsV1PipelinesBlocked(swf.Namespace) {
+// hasUnsupportedWorkflowTemplate rejects embedded templates without the marker
+// emitted by the IR compiler, including old v2-compatible pipeline templates.
+func hasUnsupportedWorkflowTemplate(swf *util.ScheduledWorkflow) bool {
+	if swf == nil {
 		return false
 	}
 
@@ -804,10 +806,6 @@ func shouldEnforceV1Block(swf *util.ScheduledWorkflow) bool {
 		return true
 	}
 
-	if hasV2PipelineMarker(wf.GetLabels(), wf.GetAnnotations()) {
-		return false
-	}
-
 	if hasV2ComponentMarker(wf.Spec.PodMetadata) {
 		return false
 	}
@@ -832,11 +830,7 @@ func hasV2ComponentMarker(podMetadata *workflowapi.Metadata) bool {
 		return false
 	}
 
-	return podMetadata.Labels[util.V2Key] == "true" || podMetadata.Annotations[util.V2Key] == "true"
-}
-
-func hasV2PipelineMarker(labels, annotations map[string]string) bool {
-	return labels[util.V2PipelineKey] == "true" || annotations[util.V2PipelineKey] == "true"
+	return podMetadata.Labels[commonutil.V2ComponentKey] == "true" || podMetadata.Annotations[commonutil.V2ComponentKey] == "true"
 }
 
 // crdPluginsInputToProto converts the CRD's map[string]apiextensionsv1.JSON

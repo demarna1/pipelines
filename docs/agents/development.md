@@ -2,18 +2,19 @@
 
 ## Python setup
 
-Use a `.venv`:
+Use Python 3.11 or newer. Python 3.9 and 3.10 are no longer supported for current
+KFP packages or development. See the [migration guidance](../python-sdk.md#python-version-support).
+The uv workspace creates `.venv`:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -U pip setuptools wheel
+uv sync --frozen --extra dev
 make -C api python-dev
 make -C kubernetes_platform python-dev
-pip install -e api/v2alpha1/python --config-settings editable_mode=strict
-pip install -e sdk/python --config-settings editable_mode=strict
-pip install -e kubernetes_platform/python --config-settings editable_mode=strict
 ```
+
+Package metadata lives in each workspace member's `pyproject.toml`; regenerate
+`uv.lock` with `uv lock` after dependency changes. Keep the exported requirements
+files synchronized using the commands in `.github/workflows/check-requirements-txt.yml`.
 
 Install Ginkgo into the repository when running its suites:
 
@@ -21,6 +22,20 @@ Install Ginkgo into the repository when running its suites:
 make ginkgo
 export PATH="$PWD/bin:$PATH"
 ```
+
+## Upgrade Go
+
+The effective compiler in the root `go.mod` is the repository-wide Go version.
+Update all managed module and builder-image pins with:
+
+```bash
+make update-go-version GO_VERSION=1.X.Y
+```
+
+Then review the diff and run `make check-go-version`. The deliberately narrow
+managed forms and explicit non-goals are documented in
+[`go-version-policy.md`](go-version-policy.md); register new locations instead
+of expanding the updater into a language interpreter.
 
 ## Local clusters
 
@@ -30,6 +45,8 @@ export PATH="$PWD/bin:$PATH"
 | API-server development cluster | `make -C backend dev-kind-cluster` |
 
 Standalone mode is single-user and unauthenticated. Multi-user deployments require an identity provider, namespace isolation, and Istio; see [`manifests/kustomize/README.md`](../../manifests/kustomize/README.md).
+
+Both targets wait for cluster components to become ready with configurable timeouts (defaults unchanged; override for slow connections or resource-constrained CI): `MYSQL_WAIT_TIMEOUT` (default `10m`), `CERT_MANAGER_WAIT_TIMEOUT` (default `300s`), `METADATA_GRPC_WAIT_TIMEOUT` (default `3m`), `ML_PIPELINE_WAIT_TIMEOUT` (default `3m`), e.g. `make -C backend kind-cluster-agnostic MYSQL_WAIT_TIMEOUT=20m`.
 
 ## Environment variables
 
@@ -109,8 +126,54 @@ configure Argo's native workflow TTL or set `ttlSecondsAfterFinished` on your
 workflow templates. The TTL should be shorter than `ARCHIVED_RUNS_RETENTION_TIME`
 so Argo cleans up the CR before GC deletes the database row.
 
+The API server only changes a run or deletes a Workflow after fetching the live
+Workflow and matching its immutable UID, resource version, run label, namespace,
+and recurring-run owner. Workflow deletion uses UID and resource-version
+preconditions so a same-name replacement or concurrently retried Workflow is
+never removed. If a one-time Workflow has no database run, the API server waits
+out the run-creation grace period and then safely deletes the UID-verified live
+orphan. A missing or inconsistent recurring-run owner remains fail-closed
+because its tenant cannot be established. If orphan propagation strips the
+owner while the recurring-run row still exists, the report is rejected
+permanently and counted as an identity mismatch instead of being retried
+indefinitely. Configure Argo's workflow TTL (one hour in the shipped
+configuration) and explicitly inspect these orphans.
+
+Rejected reports are logged and counted by
+`resource_manager_workflow_reports_rejected_total`, with
+`reason="ownership_unresolved"`, `reason="namespace_mismatch"`, or
+`reason="identity_mismatch"`. Alert on these reasons and repair legacy database
+ownership before retrying a multi-user report. Standalone single-user mode may
+recover the execution namespace from the live Workflow for old rows that have
+no persisted namespace; multi-user namespace mismatches always fail closed.
+Transient Kubernetes lookup failures and terminal reports accepted through a
+stored-identity fallback are not counted as rejections. Workflow reports do
+perform synchronous identity reads, so Kubernetes API outages delay report
+persistence until those reads succeed.
+
+New runs persist their actual Kubernetes execution namespace even in
+single-user mode. API resource references therefore expose that namespace
+instead of an empty namespace; legacy empty-namespace rows remain supported by
+resolving their namespace from the reporting Workflow.
+
 The garbage collector also does not remove rows from the `artifacts` table,
 MLMD records, or object-store artifacts; those lifecycles are managed
 separately (see `ARTIFACT_RETENTION_DAYS` for object-store artifacts).
 
-`TENSORBOARD_PROXY_SIGNING_SECRET` is optional; it defaults to `MINIO_SECRET_KEY`.
+`TENSORBOARD_PROXY_SIGNING_SECRET` controls the HMAC key for scoped TensorBoard
+proxy paths. The default Kustomize installation uses an initialization Job to
+populate the persistent `ml-pipeline-ui-tensorboard-proxy` Secret only when its
+key is absent, then injects the shared key into every UI replica. The UI uses
+`Recreate` by default to prevent old and shared-key UI pods from overlapping
+during the first migration. Preserve the Secret across upgrades so proxy URLs
+remain valid. After the initial rollout completes, operators can
+[enable rolling UI updates](../operator-guides/server-config.md#enabling-rolling-ui-updates)
+in a separate apply or GitOps sync. See the
+[operator guide](../operator-guides/server-config.md#tensorboard-proxy-signing-secret)
+for initialization, recovery, GitOps, and rotation guidance.
+
+Outside the default manifests, leaving this variable unset generates a
+cryptographically random, process-local key at startup for local development.
+Custom deployments need a shared key before enabling multiple replicas or
+rolling updates. Use a dedicated random secret of at least 32 UTF-8 bytes;
+the frontend rejects shorter values and values matching `MINIO_SECRET_KEY`.

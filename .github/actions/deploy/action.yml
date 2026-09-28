@@ -38,6 +38,10 @@ inputs:
   argo_version:
     required: false
     description: "Argo version to use for the cluster"
+  db_type:
+    description: "The type of database to deploy for testing (mysql or pgx)."
+    required: false
+    default: ""
   forward_port:
     required: false
     default: 'true'
@@ -180,12 +184,18 @@ runs:
         if [ "${{inputs.pod_to_pod_tls_enabled }}" = "true" ]; then
           ARGS="${ARGS} --tls-enabled"
         fi
+
+        if [ -n "${{ inputs.db_type }}" ]; then
+          echo "Deploying with database type ${{ inputs.db_type }}"
+          ARGS="${ARGS} --db-type ${{ inputs.db_type }}"
+        fi
+
         echo "ARGS=$ARGS" >> "$GITHUB_OUTPUT"
 
     - name: Deploy KFP
       id: deploy-kfp
       if: ${{ steps.configure.outcome == 'success' }}
-      uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+      uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60
       with:
         max_attempts: 2
         timeout_minutes: 15
