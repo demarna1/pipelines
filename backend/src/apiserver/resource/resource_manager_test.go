@@ -3661,6 +3661,35 @@ func TestCreateJob_ThroughPipelineIdAndPipelineVersion(t *testing.T) {
 	assert.Equal(t, expectedJob.ToV2(), newJob.ToV2())
 }
 
+func TestCreateJob_RawManifest_PluginsRegistered_KeepsEmbeddedWorkflow(t *testing.T) {
+	store, manager, exp := initWithExperiment(t)
+	defer store.Close()
+	// Raw manifest has no pipeline reference, so it must keep embedding even with
+	// plugins registered -- otherwise CreateRun gets an empty reference.
+	manager.pluginDispatcher = &countingTerminalReportDispatcher{}
+
+	job := &model.Job{
+		DisplayName: "j1",
+		Enabled:     true,
+		PipelineSpec: model.PipelineSpec{
+			PipelineSpecManifest: model.LargeText(v2SpecHelloWorld),
+			RuntimeConfig: model.RuntimeConfig{
+				Parameters:   "{\"text\":\"world\"}",
+				PipelineRoot: "job-1-root",
+			},
+		},
+		ExperimentId: exp.UUID,
+	}
+	newJob, err := manager.CreateJob(context.Background(), job)
+	require.Nil(t, err)
+	assert.NotEmpty(t, newJob.PipelineSpecManifest)
+
+	swf, err := store.SwfClient().ScheduledWorkflow("ns1").Get(context.Background(), "job-", v1.GetOptions{})
+	require.Nil(t, err)
+	require.NotNil(t, swf.Spec.Workflow)
+	assert.NotNil(t, swf.Spec.Workflow.Spec)
+}
+
 func TestCreateJob_EmptyPipelineSpec(t *testing.T) {
 	initEnvVars()
 	store := NewFakeClientManagerOrFatal(util.NewFakeTimeForEpoch())

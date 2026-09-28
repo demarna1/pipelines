@@ -1759,17 +1759,20 @@ func (r *ResourceManager) CreateJob(ctx context.Context, job *model.Job) (*model
 		if err != nil {
 			return nil, util.Wrap(err, "Failed to create a recurring run during scheduled workflow creation")
 		}
-		// When plugins are enabled, the SWF controller must call the CreateRun API
-		// so that per-run plugin logic executes.
-		if r.pluginDispatcher.PluginsRegistered() {
-			// Plugin-enabled: create a lightweight SWF without inline workflow spec
-			// so the SWF controller calls the CreateRun API for per-run plugin logic.
-			scheduledWorkflow, err = template.NewGenericScheduledWorkflow(job)
+		// Plugins require the CreateRun API path, which needs a pipeline reference.
+		// A raw manifest has none, so it keeps embedding rather than failing at
+		// every trigger.
+		if r.pluginDispatcher.PluginsRegistered() && job.PipelineId != "" {
+			// Plugin-enabled: create a SWF without inline workflow spec so the SWF
+			// controller calls the CreateRun API for per-run plugin logic. The
+			// reference SWF still carries the runtime parameters and pipeline root
+			// so they reach the CreateRun request.
+			scheduledWorkflow, err = template.NewReferenceScheduledWorkflow(job)
+			if err != nil {
+				return nil, util.Wrap(err, "Failed to create a recurring run during scheduled workflow creation")
+			}
 		} else {
 			scheduledWorkflow = renderedScheduledWorkflow
-		}
-		if err != nil {
-			return nil, util.Wrap(err, "Failed to create a recurring run during scheduled workflow creation")
 		}
 	} else if job.PipelineId == "" {
 		return nil, errors.New("Cannot create a job with an empty pipeline ID")
@@ -1807,18 +1810,9 @@ func (r *ResourceManager) CreateJob(ctx context.Context, job *model.Job) (*model
 			}
 		}
 
-		scheduledWorkflow, err = template.NewGenericScheduledWorkflow(job)
+		scheduledWorkflow, err = template.NewReferenceScheduledWorkflow(job)
 		if err != nil {
-			return nil, util.Wrap(err, "Failed to create a recurring run during scheduled workflow creation")
-		}
-
-		parameters, err := template.StringMapToCRDParameters(string(job.RuntimeConfig.Parameters))
-		if err != nil {
-			return nil, util.Wrap(err, "Converting runtime config's parameters to CDR parameters failed")
-		}
-
-		scheduledWorkflow.Spec.Workflow = &scheduledworkflow.WorkflowResource{
-			Parameters: parameters, PipelineRoot: string(job.PipelineRoot),
+			return nil, err
 		}
 		scheduledWorkflow.Spec.ServiceAccount = renderedScheduledWorkflow.Spec.ServiceAccount
 	}
